@@ -814,23 +814,122 @@ if connection_status:
                 with sheet_tabs[i]:
                     st.subheader(f"{sheet_name} Data")
                     
-                    # Filter columns if needed
+                    # Get the dataframe
                     display_df = data[sheet_name].copy()
                     
+                    # Filter columns if needed
                     if not show_all_columns and sheet_name in columns_to_hide:
                         # Filter out columns that should be hidden
                         cols_to_hide = [col for col in columns_to_hide[sheet_name] if col in display_df.columns]
                         display_df = display_df.drop(columns=cols_to_hide)
                     
-                    # Display the filtered dataframe
-                    st.dataframe(display_df, use_container_width=True)
+                    # Excel-like filtering
+                    with st.expander("Excel-like Filters", expanded=False):
+                        st.write("Select columns to filter:")
+                        
+                        # Get all available columns (excluding hidden ones)
+                        available_columns = display_df.columns.tolist()
+                        
+                        # Let user select which columns to filter on
+                        filter_columns = st.multiselect(
+                            "Select columns to add filters for:",
+                            available_columns,
+                            default=[],
+                            key=f"filter_columns_{sheet_name}"
+                        )
+                        
+                        # Create filters for selected columns
+                        filtered_data = display_df.copy()
+                        
+                        for column in filter_columns:
+                            st.write(f"Filter for: {column}")
+                            
+                            # Handle different data types differently
+                            if pd.api.types.is_numeric_dtype(filtered_data[column]):
+                                # For numeric columns, create a range slider
+                                min_val = float(filtered_data[column].min())
+                                max_val = float(filtered_data[column].max())
+                                
+                                # Handle same min and max values
+                                if min_val == max_val:
+                                    st.write(f"All values are {min_val}")
+                                    continue
+                                    
+                                # Create range slider
+                                value_range = st.slider(
+                                    f"Range for {column}",
+                                    min_value=min_val,
+                                    max_value=max_val,
+                                    value=(min_val, max_val),
+                                    key=f"{sheet_name}_{column}_range"
+                                )
+                                
+                                # Apply filter based on slider
+                                filtered_data = filtered_data[
+                                    (filtered_data[column] >= value_range[0]) & 
+                                    (filtered_data[column] <= value_range[1])
+                                ]
+                                
+                            elif pd.api.types.is_datetime64_any_dtype(filtered_data[column]):
+                                # For date columns, create date inputs
+                                min_date = filtered_data[column].min().date()
+                                max_date = filtered_data[column].max().date()
+                                
+                                # Create two date inputs
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    start_date = st.date_input(
+                                        f"Start date for {column}",
+                                        value=min_date,
+                                        min_value=min_date,
+                                        max_value=max_date,
+                                        key=f"{sheet_name}_{column}_start"
+                                    )
+                                with col2:
+                                    end_date = st.date_input(
+                                        f"End date for {column}",
+                                        value=max_date,
+                                        min_value=min_date,
+                                        max_value=max_date,
+                                        key=f"{sheet_name}_{column}_end"
+                                    )
+                                
+                                # Apply filter based on date range
+                                filtered_data = filtered_data[
+                                    (filtered_data[column].dt.date >= start_date) & 
+                                    (filtered_data[column].dt.date <= end_date)
+                                ]
+                                
+                            else:
+                                # For categorical/string columns, create a multiselect
+                                unique_values = filtered_data[column].dropna().unique().tolist()
+                                selected_values = st.multiselect(
+                                    f"Select values for {column}",
+                                    unique_values,
+                                    default=unique_values,
+                                    key=f"{sheet_name}_{column}_select"
+                                )
+                                
+                                # Apply filter based on selection
+                                if selected_values:
+                                    filtered_data = filtered_data[filtered_data[column].isin(selected_values)]
+                        
+                        # Show filter stats
+                        st.write(f"Showing {len(filtered_data)} of {len(display_df)} rows after filtering")
+                        
+                        # Reset filters button
+                        if st.button("Reset All Filters", key=f"reset_filters_{sheet_name}"):
+                            st.experimental_rerun()
                     
-                    # Add download button for each table (always with all columns)
-                    csv = data[sheet_name].to_csv(index=False).encode('utf-8')
+                    # Display the filtered dataframe
+                    st.dataframe(filtered_data, use_container_width=True)
+                    
+                    # Add download button for filtered data
+                    csv = filtered_data.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label=f"Download {sheet_name} as CSV",
+                        label=f"Download Filtered {sheet_name} as CSV",
                         data=csv,
-                        file_name=f"{sheet_name}.csv",
+                        file_name=f"{sheet_name}_filtered.csv",
                         mime="text/csv",
                     )
                     
@@ -840,12 +939,23 @@ if connection_status:
                         selected_columns = st.multiselect(
                             f"Select columns to display for {sheet_name}",
                             all_columns,
-                            default=[col for col in all_columns if col not in columns_to_hide.get(sheet_name, [])]
+                            default=[col for col in all_columns if col not in columns_to_hide.get(sheet_name, [])],
+                            key=f"custom_columns_{sheet_name}"
                         )
                         
                         if selected_columns:
-                            st.dataframe(data[sheet_name][selected_columns], use_container_width=True)
-
+                            custom_filtered_data = filtered_data[selected_columns]
+                            st.dataframe(custom_filtered_data, use_container_width=True)
+                            
+                            # Add download for custom view
+                            custom_csv = custom_filtered_data.to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label=f"Download Custom View as CSV",
+                                data=custom_csv,
+                                file_name=f"{sheet_name}_custom.csv",
+                                mime="text/csv",
+                                key=f"download_custom_{sheet_name}"
+                            )
         # Add information and credits
         st.sidebar.markdown("---")
         st.sidebar.info(
