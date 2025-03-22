@@ -44,23 +44,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Database connection parameters - now using st.secrets
-try:
-    # Get connection details from secrets.toml
-    PG_HOST = st.secrets["postgresql"]["host"]
-    PG_PORT = st.secrets["postgresql"]["port"]
-    PG_DATABASE = st.secrets["postgresql"]["database"]
-    PG_USER = st.secrets["postgresql"]["user"]
-    PG_PASSWORD = st.secrets["postgresql"]["password"]
-except Exception as e:
-    # Fallback to default values if secrets are not available
-    # This helps during development or when secrets are not properly configured
-    PG_HOST = '164.52.193.222'
-    PG_PORT = '5432'
-    PG_DATABASE = 'hb_dashboard'
-    PG_USER = 'postgres'
-    PG_PASSWORD = '9167199744'
-    st.warning(f"Using default database credentials. Secrets error: {e}")
-
+# Get connection details from secrets.toml
+PG_HOST = st.secrets["postgresql"]["host"]
+PG_PORT = st.secrets["postgresql"]["port"]
+PG_DATABASE = st.secrets["postgresql"]["database"]
+PG_USER = st.secrets["postgresql"]["user"]
+PG_PASSWORD = st.secrets["postgresql"]["password"]
+# 
 # SQLAlchemy connection string for pandas
 pg_connection_string = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DATABASE}"
 
