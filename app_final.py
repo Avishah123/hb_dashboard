@@ -44,13 +44,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Database connection parameters - now using st.secrets
-# Get connection details from secrets.toml
+
+    # Get connection details from secrets.toml
 PG_HOST = st.secrets["postgresql"]["host"]
 PG_PORT = st.secrets["postgresql"]["port"]
 PG_DATABASE = st.secrets["postgresql"]["database"]
 PG_USER = st.secrets["postgresql"]["user"]
 PG_PASSWORD = st.secrets["postgresql"]["password"]
-# 
+
 # SQLAlchemy connection string for pandas
 pg_connection_string = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DATABASE}"
 
@@ -320,7 +321,7 @@ if connection_status:
         }
 
         # Create tabs for different views
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Overview", "INDEX", "STOCKS", "Total Index", "Total Stocks", "Raw Data"])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "INDEX", "STOCKS", "Total Index", "Total Stocks", "Percentage Change", "Raw Data"])
 
         with tab1:
             st.header("Market Overview")
@@ -780,9 +781,528 @@ if connection_status:
                     st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.error(f"Error displaying Nifty comparison chart: {e}")
-
-        # New tab to display raw data with column hiding option
+                
+        # New tab for Percentage Change Analysis
         with tab6:
+            st.header("Percentage Change Analysis")
+            
+            # Create subtabs for STOCKS and INDEX
+            pct_tab1, pct_tab2 = st.tabs(["STOCKS Percentage Change", "INDEX Percentage Change"])
+            
+            with pct_tab1:
+                st.subheader("STOCKS Percentage Change Analysis")
+                
+                # User inputs for percentage threshold and time period
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    stocks_pct_threshold = st.number_input("Percentage Change Threshold (%)", 
+                                                          min_value=1, max_value=100, value=10, key="stocks_pct")
+                
+                with col2:
+                    stocks_days_lookback = st.number_input("Days Lookback Period", 
+                                                          min_value=1, max_value=365, value=7, key="stocks_days")
+                
+                # Apply analysis to STOCKS
+                if 'Date' in filtered_data["STOCKS"].columns:
+                    # Get the current max date in the filtered data
+                    max_date = filtered_data["STOCKS"]["Date"].max()
+                    
+                    # Calculate lookback date
+                    lookback_date = max_date - pd.Timedelta(days=stocks_days_lookback)
+                    
+                    # Get all data from the lookback period
+                    lookback_data = filtered_data["STOCKS"][filtered_data["STOCKS"]["Date"] >= lookback_date]
+                    
+                    if not lookback_data.empty:
+                        # Get the earliest and latest dates for each stock in the lookback period
+                        earliest_data = lookback_data.sort_values("Date").groupby("Symbol").first().reset_index()
+                        latest_data = lookback_data.sort_values("Date").groupby("Symbol").last().reset_index()
+                        
+                        # Rename columns to avoid confusion
+                        earliest_data = earliest_data.rename(columns={
+                            "Date": "StartDate",
+                            "NetValue_in_Cr": "StartValue"
+                        })
+                        
+                        latest_data = latest_data.rename(columns={
+                            "Date": "EndDate",
+                            "NetValue_in_Cr": "EndValue"
+                        })
+                        
+                        # Select only necessary columns
+                        earliest_data = earliest_data[["Symbol", "StartDate", "StartValue"]]
+                        latest_data = latest_data[["Symbol", "EndDate", "EndValue"]]
+                        
+                        # Merge data
+                        merged_data = pd.merge(earliest_data, latest_data, on="Symbol")
+                        
+                        # Calculate days between
+                        merged_data["DaysBetween"] = (merged_data["EndDate"] - merged_data["StartDate"]).dt.days
+                        
+                        # Calculate percentage change
+                        merged_data["PctChange"] = ((merged_data["EndValue"] - merged_data["StartValue"]) / 
+                                                   merged_data["StartValue"].replace(0, float('nan'))) * 100
+                        
+                        # Replace infinite values with NaN (happens when StartValue is 0)
+                        merged_data["PctChange"].replace([float('inf'), float('-inf')], float('nan'), inplace=True)
+                        
+                        # Filter based on threshold and minimum days
+                        min_days_required = max(1, stocks_days_lookback * 0.5)  # At least 50% of requested lookback period
+                        valid_data = merged_data[merged_data["DaysBetween"] >= min_days_required]
+                        
+                        # Drop rows with NaN percentage change
+                        valid_data = valid_data.dropna(subset=["PctChange"])
+                        
+                        significant_changes = valid_data[
+                            (valid_data["PctChange"] >= stocks_pct_threshold) | 
+                            (valid_data["PctChange"] <= -stocks_pct_threshold)
+                        ]
+                        
+                        # Sort by absolute percentage change (descending)
+                        significant_changes["AbsPctChange"] = significant_changes["PctChange"].abs()
+                        significant_changes = significant_changes.sort_values("AbsPctChange", ascending=False)
+                        
+                        # Display results
+                        if not significant_changes.empty:
+                            # Add formatted columns for display
+                            significant_changes["StartValue_Formatted"] = significant_changes["StartValue"].apply(
+                                lambda x: '₹{:,.2f} Cr'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["EndValue_Formatted"] = significant_changes["EndValue"].apply(
+                                lambda x: '₹{:,.2f} Cr'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["PctChange_Formatted"] = significant_changes["PctChange"].apply(
+                                lambda x: '{:+.2f}%'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            
+                            # Display the table
+                            display_cols = [
+                                "Symbol", "StartDate", "EndDate", "StartValue_Formatted", 
+                                "EndValue_Formatted", "PctChange_Formatted", "DaysBetween"
+                            ]
+                            
+                            st.subheader(f"Stocks with ≥{stocks_pct_threshold}% Change in Net Value (Last ~{stocks_days_lookback} days)")
+                            st.dataframe(significant_changes[display_cols], use_container_width=True)
+                            
+                            # Create visualization
+                            fig = px.bar(
+                                significant_changes,
+                                x="Symbol",
+                                y="PctChange",
+                                title=f"Percentage Change in Net Value (≥{stocks_pct_threshold}%)",
+                                labels={"PctChange": "% Change", "Symbol": "Stock"},
+                                color="PctChange",
+                                color_continuous_scale="RdBu",
+                                hover_data=["StartValue", "EndValue", "DaysBetween"]
+                            )
+                            
+                            # Update layout
+                            fig.update_layout(
+                                title_font=dict(size=20),
+                                legend_font=dict(size=20),
+                                xaxis_title_font=dict(size=20),
+                                yaxis_title_font=dict(size=20),
+                                xaxis_tickfont=dict(size=20),
+                                yaxis_tickfont=dict(size=20)
+                            )
+                            
+                            # Add a horizontal line at y=0
+                            fig.add_shape(
+                                type="line",
+                                x0=-0.5,
+                                y0=0,
+                                x1=len(significant_changes) - 0.5,
+                                y1=0,
+                                line=dict(color="black", width=1, dash="dash")
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Add interactive time series visualization for selected stock
+                            st.subheader("Detailed Time Series Analysis")
+                            
+                            # Create a selection box for user to select a stock
+                            selected_stock = st.selectbox(
+                                "Select a stock to view detailed trend:",
+                                options=significant_changes["Symbol"].tolist(),
+                                key="stock_detail_selector"
+                            )
+                            
+                            if selected_stock:
+                                # Get all data for the selected stock within the lookback period
+                                stock_trend_data = lookback_data[lookback_data["Symbol"] == selected_stock]
+                                
+                                if not stock_trend_data.empty:
+                                    # Create trend visualization
+                                    st.subheader(f"{selected_stock} Net Value Trend (Last {stocks_days_lookback} Days)")
+                                    
+                                    # Show beginning and ending values
+                                    start_val = stock_trend_data.sort_values("Date")["NetValue_in_Cr"].iloc[0]
+                                    end_val = stock_trend_data.sort_values("Date")["NetValue_in_Cr"].iloc[-1]
+                                    pct_change = ((end_val - start_val) / start_val) * 100 if start_val != 0 else float('nan')
+                                    
+                                    metric_cols = st.columns(3)
+                                    with metric_cols[0]:
+                                        st.metric("Starting Value", f"₹{start_val:,.2f} Cr")
+                                    with metric_cols[1]:
+                                        st.metric("Ending Value", f"₹{end_val:,.2f} Cr")
+                                    with metric_cols[2]:
+                                        st.metric("Change", f"{pct_change:+.2f}%", 
+                                                 delta_color="normal" if pct_change >= 0 else "inverse")
+                                    
+                                    # Create the line chart
+                                    fig = px.line(
+                                        stock_trend_data.sort_values("Date"),
+                                        x="Date",
+                                        y="NetValue_in_Cr",
+                                        title=f"{selected_stock} Net Value Trend",
+                                        labels={"NetValue_in_Cr": "Net Value (Cr)", "Date": "Date"},
+                                        markers=True
+                                    )
+                                    
+                                    # Add a reference line for the starting value
+                                    fig.add_shape(
+                                        type="line",
+                                        x0=stock_trend_data["Date"].min(),
+                                        y0=start_val,
+                                        x1=stock_trend_data["Date"].max(),
+                                        y1=start_val,
+                                        line=dict(color="gray", width=1, dash="dash")
+                                    )
+                                    
+                                    # Customize chart appearance
+                                    fig.update_layout(
+                                        title_font=dict(size=20),
+                                        legend_font=dict(size=20),
+                                        xaxis_title_font=dict(size=20),
+                                        yaxis_title_font=dict(size=20),
+                                        xaxis_tickfont=dict(size=20),
+                                        yaxis_tickfont=dict(size=20)
+                                    )
+                                    
+                                    # Determine color based on trend
+                                    line_color = "green" if pct_change >= 0 else "red"
+                                    fig.update_traces(line_color=line_color)
+                                    
+                                    # Add annotations for start and end points
+                                    fig.add_annotation(
+                                        x=stock_trend_data["Date"].min(),
+                                        y=start_val,
+                                        text="Start",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    fig.add_annotation(
+                                        x=stock_trend_data["Date"].max(),
+                                        y=end_val,
+                                        text="End",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    # Additional analysis metrics
+                                    with st.expander("Additional Statistics"):
+                                        stats_df = pd.DataFrame({
+                                            "Metric": ["Mean Value", "Max Value", "Min Value", "Standard Deviation", "Days Tracked"],
+                                            "Value": [
+                                                f"₹{stock_trend_data['NetValue_in_Cr'].mean():,.2f} Cr",
+                                                f"₹{stock_trend_data['NetValue_in_Cr'].max():,.2f} Cr",
+                                                f"₹{stock_trend_data['NetValue_in_Cr'].min():,.2f} Cr",
+                                                f"₹{stock_trend_data['NetValue_in_Cr'].std():,.2f} Cr",
+                                                f"{len(stock_trend_data)} days"
+                                            ]
+                                        })
+                                        st.dataframe(stats_df, use_container_width=True)
+                                else:
+                                    st.warning(f"No trend data available for {selected_stock} within the selected time period.")
+                            
+                            # Additionally, show separate tables for rising and falling stocks
+                            rising_stocks = significant_changes[significant_changes["PctChange"] > 0]
+                            falling_stocks = significant_changes[significant_changes["PctChange"] < 0]
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.subheader(f"Rising Stocks (≥{stocks_pct_threshold}%)")
+                                if not rising_stocks.empty:
+                                    st.dataframe(rising_stocks[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No stocks found with a rise ≥{stocks_pct_threshold}%.")
+                            
+                            with col2:
+                                st.subheader(f"Falling Stocks (≥{stocks_pct_threshold}%)")
+                                if not falling_stocks.empty:
+                                    st.dataframe(falling_stocks[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No stocks found with a fall ≥{stocks_pct_threshold}%.")
+                        else:
+                            st.info(f"No stocks found with changes ≥{stocks_pct_threshold}% in the last ~{stocks_days_lookback} days.")
+                    else:
+                        st.warning(f"Insufficient data for the selected lookback period of {stocks_days_lookback} days.")
+                else:
+                    st.warning("Date column not found in STOCKS data.")
+            
+            with pct_tab2:
+                st.subheader("INDEX Percentage Change Analysis")
+                
+                # User inputs for percentage threshold and time period
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    index_pct_threshold = st.number_input("Percentage Change Threshold (%)", 
+                                                         min_value=1, max_value=100, value=5, key="index_pct")
+                
+                with col2:
+                    index_days_lookback = st.number_input("Days Lookback Period", 
+                                                         min_value=1, max_value=365, value=7, key="index_days")
+                
+                # Apply analysis to INDEX
+                if 'Date' in filtered_data["INDEX"].columns:
+                    # Get the current max date in the filtered data
+                    max_date = filtered_data["INDEX"]["Date"].max()
+                    
+                    # Calculate lookback date
+                    lookback_date = max_date - pd.Timedelta(days=index_days_lookback)
+                    
+                    # Get all data from the lookback period
+                    lookback_data = filtered_data["INDEX"][filtered_data["INDEX"]["Date"] >= lookback_date]
+                    
+                    if not lookback_data.empty:
+                        # Get the earliest and latest dates for each index in the lookback period
+                        earliest_data = lookback_data.sort_values("Date").groupby("Symbol").first().reset_index()
+                        latest_data = lookback_data.sort_values("Date").groupby("Symbol").last().reset_index()
+                        
+                        # Rename columns to avoid confusion
+                        earliest_data = earliest_data.rename(columns={
+                            "Date": "StartDate",
+                            "NetValue_in_Cr": "StartValue"
+                        })
+                        
+                        latest_data = latest_data.rename(columns={
+                            "Date": "EndDate",
+                            "NetValue_in_Cr": "EndValue"
+                        })
+                        
+                        # Select only necessary columns
+                        earliest_data = earliest_data[["Symbol", "StartDate", "StartValue"]]
+                        latest_data = latest_data[["Symbol", "EndDate", "EndValue"]]
+                        
+                        # Merge data
+                        merged_data = pd.merge(earliest_data, latest_data, on="Symbol")
+                        
+                        # Calculate days between
+                        merged_data["DaysBetween"] = (merged_data["EndDate"] - merged_data["StartDate"]).dt.days
+                        
+                        # Calculate percentage change
+                        merged_data["PctChange"] = ((merged_data["EndValue"] - merged_data["StartValue"]) / 
+                                                   merged_data["StartValue"].replace(0, float('nan'))) * 100
+                        
+                        # Replace infinite values with NaN (happens when StartValue is 0)
+                        merged_data["PctChange"].replace([float('inf'), float('-inf')], float('nan'), inplace=True)
+                        
+                        # Filter based on threshold and minimum days
+                        min_days_required = max(1, index_days_lookback * 0.5)  # At least 50% of requested lookback period
+                        valid_data = merged_data[merged_data["DaysBetween"] >= min_days_required]
+                        
+                        # Drop rows with NaN percentage change
+                        valid_data = valid_data.dropna(subset=["PctChange"])
+                        
+                        significant_changes = valid_data[
+                            (valid_data["PctChange"] >= index_pct_threshold) | 
+                            (valid_data["PctChange"] <= -index_pct_threshold)
+                        ]
+                        
+                        # Sort by absolute percentage change (descending)
+                        significant_changes["AbsPctChange"] = significant_changes["PctChange"].abs()
+                        significant_changes = significant_changes.sort_values("AbsPctChange", ascending=False)
+                        
+                        # Display results
+                        if not significant_changes.empty:
+                            # Add formatted columns for display
+                            significant_changes["StartValue_Formatted"] = significant_changes["StartValue"].apply(
+                                lambda x: '₹{:,.2f} Cr'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["EndValue_Formatted"] = significant_changes["EndValue"].apply(
+                                lambda x: '₹{:,.2f} Cr'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["PctChange_Formatted"] = significant_changes["PctChange"].apply(
+                                lambda x: '{:+.2f}%'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            
+                            # Display the table
+                            display_cols = [
+                                "Symbol", "StartDate", "EndDate", "StartValue_Formatted", 
+                                "EndValue_Formatted", "PctChange_Formatted", "DaysBetween"
+                            ]
+                            
+                            st.subheader(f"Indices with ≥{index_pct_threshold}% Change in Net Value (Last ~{index_days_lookback} days)")
+                            st.dataframe(significant_changes[display_cols], use_container_width=True)
+                            
+                            # Create visualization
+                            fig = px.bar(
+                                significant_changes,
+                                x="Symbol",
+                                y="PctChange",
+                                title=f"Percentage Change in Net Value (≥{index_pct_threshold}%)",
+                                labels={"PctChange": "% Change", "Symbol": "Index"},
+                                color="PctChange",
+                                color_continuous_scale="RdBu",
+                                hover_data=["StartValue", "EndValue", "DaysBetween"]
+                            )
+                            
+                            # Update layout
+                            fig.update_layout(
+                                title_font=dict(size=20),
+                                legend_font=dict(size=20),
+                                xaxis_title_font=dict(size=20),
+                                yaxis_title_font=dict(size=20),
+                                xaxis_tickfont=dict(size=20),
+                                yaxis_tickfont=dict(size=20)
+                            )
+                            
+                            # Add a horizontal line at y=0
+                            fig.add_shape(
+                                type="line",
+                                x0=-0.5,
+                                y0=0,
+                                x1=len(significant_changes) - 0.5,
+                                y1=0,
+                                line=dict(color="black", width=1, dash="dash")
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Add interactive time series visualization for selected index
+                            st.subheader("Detailed Time Series Analysis")
+                            
+                            # Create a selection box for user to select an index
+                            selected_index = st.selectbox(
+                                "Select an index to view detailed trend:",
+                                options=significant_changes["Symbol"].tolist(),
+                                key="index_detail_selector"
+                            )
+                            
+                            if selected_index:
+                                # Get all data for the selected index within the lookback period
+                                index_trend_data = lookback_data[lookback_data["Symbol"] == selected_index]
+                                
+                                if not index_trend_data.empty:
+                                    # Create trend visualization
+                                    st.subheader(f"{selected_index} Net Value Trend (Last {index_days_lookback} Days)")
+                                    
+                                    # Show beginning and ending values
+                                    start_val = index_trend_data.sort_values("Date")["NetValue_in_Cr"].iloc[0]
+                                    end_val = index_trend_data.sort_values("Date")["NetValue_in_Cr"].iloc[-1]
+                                    pct_change = ((end_val - start_val) / start_val) * 100 if start_val != 0 else float('nan')
+                                    
+                                    metric_cols = st.columns(3)
+                                    with metric_cols[0]:
+                                        st.metric("Starting Value", f"₹{start_val:,.2f} Cr")
+                                    with metric_cols[1]:
+                                        st.metric("Ending Value", f"₹{end_val:,.2f} Cr")
+                                    with metric_cols[2]:
+                                        st.metric("Change", f"{pct_change:+.2f}%", 
+                                                 delta_color="normal" if pct_change >= 0 else "inverse")
+                                    
+                                    # Create the line chart
+                                    fig = px.line(
+                                        index_trend_data.sort_values("Date"),
+                                        x="Date",
+                                        y="NetValue_in_Cr",
+                                        title=f"{selected_index} Net Value Trend",
+                                        labels={"NetValue_in_Cr": "Net Value (Cr)", "Date": "Date"},
+                                        markers=True
+                                    )
+                                    
+                                    # Add a reference line for the starting value
+                                    fig.add_shape(
+                                        type="line",
+                                        x0=index_trend_data["Date"].min(),
+                                        y0=start_val,
+                                        x1=index_trend_data["Date"].max(),
+                                        y1=start_val,
+                                        line=dict(color="gray", width=1, dash="dash")
+                                    )
+                                    
+                                    # Customize chart appearance
+                                    fig.update_layout(
+                                        title_font=dict(size=20),
+                                        legend_font=dict(size=20),
+                                        xaxis_title_font=dict(size=20),
+                                        yaxis_title_font=dict(size=20),
+                                        xaxis_tickfont=dict(size=20),
+                                        yaxis_tickfont=dict(size=20)
+                                    )
+                                    
+                                    # Determine color based on trend
+                                    line_color = "green" if pct_change >= 0 else "red"
+                                    fig.update_traces(line_color=line_color)
+                                    
+                                    # Add annotations for start and end points
+                                    fig.add_annotation(
+                                        x=index_trend_data["Date"].min(),
+                                        y=start_val,
+                                        text="Start",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    fig.add_annotation(
+                                        x=index_trend_data["Date"].max(),
+                                        y=end_val,
+                                        text="End",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    # Additional analysis metrics
+                                    with st.expander("Additional Statistics"):
+                                        stats_df = pd.DataFrame({
+                                            "Metric": ["Mean Value", "Max Value", "Min Value", "Standard Deviation", "Days Tracked"],
+                                            "Value": [
+                                                f"₹{index_trend_data['NetValue_in_Cr'].mean():,.2f} Cr",
+                                                f"₹{index_trend_data['NetValue_in_Cr'].max():,.2f} Cr",
+                                                f"₹{index_trend_data['NetValue_in_Cr'].min():,.2f} Cr",
+                                                f"₹{index_trend_data['NetValue_in_Cr'].std():,.2f} Cr",
+                                                f"{len(index_trend_data)} days"
+                                            ]
+                                        })
+                                        st.dataframe(stats_df, use_container_width=True)
+                                else:
+                                    st.warning(f"No trend data available for {selected_index} within the selected time period.")
+                            
+                            # Additionally, show separate tables for rising and falling indices
+                            rising_indices = significant_changes[significant_changes["PctChange"] > 0]
+                            falling_indices = significant_changes[significant_changes["PctChange"] < 0]
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.subheader(f"Rising Indices (≥{index_pct_threshold}%)")
+                                if not rising_indices.empty:
+                                    st.dataframe(rising_indices[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No indices found with a rise ≥{index_pct_threshold}%.")
+                            
+                            with col2:
+                                st.subheader(f"Falling Indices (≥{index_pct_threshold}%)")
+                                if not falling_indices.empty:
+                                    st.dataframe(falling_indices[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No indices found with a fall ≥{index_pct_threshold}%.")
+                        else:
+                            st.info(f"No indices found with changes ≥{index_pct_threshold}% in the last ~{index_days_lookback} days.")
+                    else:
+                        st.warning(f"Insufficient data for the selected lookback period of {index_days_lookback} days.")
+                else:
+                    st.warning("Date column not found in INDEX data.")
+
+        # Raw Data tab (now tab7)
+        with tab7:
             st.header("Raw Data")
             
             # Define columns to hide by default for each table
@@ -804,122 +1324,23 @@ if connection_status:
                 with sheet_tabs[i]:
                     st.subheader(f"{sheet_name} Data")
                     
-                    # Get the dataframe
+                    # Filter columns if needed
                     display_df = data[sheet_name].copy()
                     
-                    # Filter columns if needed
                     if not show_all_columns and sheet_name in columns_to_hide:
                         # Filter out columns that should be hidden
                         cols_to_hide = [col for col in columns_to_hide[sheet_name] if col in display_df.columns]
                         display_df = display_df.drop(columns=cols_to_hide)
                     
-                    # Excel-like filtering
-                    with st.expander("Excel-like Filters", expanded=False):
-                        st.write("Select columns to filter:")
-                        
-                        # Get all available columns (excluding hidden ones)
-                        available_columns = display_df.columns.tolist()
-                        
-                        # Let user select which columns to filter on
-                        filter_columns = st.multiselect(
-                            "Select columns to add filters for:",
-                            available_columns,
-                            default=[],
-                            key=f"filter_columns_{sheet_name}"
-                        )
-                        
-                        # Create filters for selected columns
-                        filtered_data = display_df.copy()
-                        
-                        for column in filter_columns:
-                            st.write(f"Filter for: {column}")
-                            
-                            # Handle different data types differently
-                            if pd.api.types.is_numeric_dtype(filtered_data[column]):
-                                # For numeric columns, create a range slider
-                                min_val = float(filtered_data[column].min())
-                                max_val = float(filtered_data[column].max())
-                                
-                                # Handle same min and max values
-                                if min_val == max_val:
-                                    st.write(f"All values are {min_val}")
-                                    continue
-                                    
-                                # Create range slider
-                                value_range = st.slider(
-                                    f"Range for {column}",
-                                    min_value=min_val,
-                                    max_value=max_val,
-                                    value=(min_val, max_val),
-                                    key=f"{sheet_name}_{column}_range"
-                                )
-                                
-                                # Apply filter based on slider
-                                filtered_data = filtered_data[
-                                    (filtered_data[column] >= value_range[0]) & 
-                                    (filtered_data[column] <= value_range[1])
-                                ]
-                                
-                            elif pd.api.types.is_datetime64_any_dtype(filtered_data[column]):
-                                # For date columns, create date inputs
-                                min_date = filtered_data[column].min().date()
-                                max_date = filtered_data[column].max().date()
-                                
-                                # Create two date inputs
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    start_date = st.date_input(
-                                        f"Start date for {column}",
-                                        value=min_date,
-                                        min_value=min_date,
-                                        max_value=max_date,
-                                        key=f"{sheet_name}_{column}_start"
-                                    )
-                                with col2:
-                                    end_date = st.date_input(
-                                        f"End date for {column}",
-                                        value=max_date,
-                                        min_value=min_date,
-                                        max_value=max_date,
-                                        key=f"{sheet_name}_{column}_end"
-                                    )
-                                
-                                # Apply filter based on date range
-                                filtered_data = filtered_data[
-                                    (filtered_data[column].dt.date >= start_date) & 
-                                    (filtered_data[column].dt.date <= end_date)
-                                ]
-                                
-                            else:
-                                # For categorical/string columns, create a multiselect
-                                unique_values = filtered_data[column].dropna().unique().tolist()
-                                selected_values = st.multiselect(
-                                    f"Select values for {column}",
-                                    unique_values,
-                                    default=unique_values,
-                                    key=f"{sheet_name}_{column}_select"
-                                )
-                                
-                                # Apply filter based on selection
-                                if selected_values:
-                                    filtered_data = filtered_data[filtered_data[column].isin(selected_values)]
-                        
-                        # Show filter stats
-                        st.write(f"Showing {len(filtered_data)} of {len(display_df)} rows after filtering")
-                        
-                        # Reset filters button
-                        if st.button("Reset All Filters", key=f"reset_filters_{sheet_name}"):
-                            st.experimental_rerun()
-                    
                     # Display the filtered dataframe
-                    st.dataframe(filtered_data, use_container_width=True)
+                    st.dataframe(display_df, use_container_width=True)
                     
-                    # Add download button for filtered data
-                    csv = filtered_data.to_csv(index=False).encode('utf-8')
+                    # Add download button for each table (always with all columns)
+                    csv = data[sheet_name].to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label=f"Download Filtered {sheet_name} as CSV",
+                        label=f"Download {sheet_name} as CSV",
                         data=csv,
-                        file_name=f"{sheet_name}_filtered.csv",
+                        file_name=f"{sheet_name}.csv",
                         mime="text/csv",
                     )
                     
@@ -929,23 +1350,12 @@ if connection_status:
                         selected_columns = st.multiselect(
                             f"Select columns to display for {sheet_name}",
                             all_columns,
-                            default=[col for col in all_columns if col not in columns_to_hide.get(sheet_name, [])],
-                            key=f"custom_columns_{sheet_name}"
+                            default=[col for col in all_columns if col not in columns_to_hide.get(sheet_name, [])]
                         )
                         
                         if selected_columns:
-                            custom_filtered_data = filtered_data[selected_columns]
-                            st.dataframe(custom_filtered_data, use_container_width=True)
-                            
-                            # Add download for custom view
-                            custom_csv = custom_filtered_data.to_csv(index=False).encode('utf-8')
-                            st.download_button(
-                                label=f"Download Custom View as CSV",
-                                data=custom_csv,
-                                file_name=f"{sheet_name}_custom.csv",
-                                mime="text/csv",
-                                key=f"download_custom_{sheet_name}"
-                            )
+                            st.dataframe(data[sheet_name][selected_columns], use_container_width=True)
+
         # Add information and credits
         st.sidebar.markdown("---")
         st.sidebar.info(
