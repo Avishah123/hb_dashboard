@@ -45,7 +45,7 @@ st.markdown("""
 
 # Database connection parameters - now using st.secrets
 
-    # Get connection details from secrets.toml
+# Get connection details from secrets.toml
 PG_HOST = st.secrets["postgresql"]["host"]
 PG_PORT = st.secrets["postgresql"]["port"]
 PG_DATABASE = st.secrets["postgresql"]["database"]
@@ -238,6 +238,13 @@ def load_data():
             'nsei_close': 'NSEI_Close'
         })
         
+        # Multiply MarketCap_Percentage by 100 if the column exists
+        if 'MarketCap_Percentage' in df_stocks.columns:
+            df_stocks['MarketCap_Percentage'] = df_stocks['MarketCap_Percentage'] * 100
+            
+        if 'MarketCap_Percentage' in df_index.columns:
+            df_index['MarketCap_Percentage'] = df_index['MarketCap_Percentage'] * 100
+        
         return {
             "INDEX": df_index,
             "STOCKS": df_stocks,
@@ -321,7 +328,7 @@ if connection_status:
         }
 
         # Create tabs for different views
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "INDEX", "STOCKS", "Total Index", "Total Stocks", "Percentage Change", "Raw Data"])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["Overview", "INDEX", "STOCKS", "Total Index", "Total Stocks", "Percentage Change", "Percentage Change (NetQtyFwd)", "Raw Data"])
 
         with tab1:
             st.header("Market Overview")
@@ -502,6 +509,33 @@ if connection_status:
                         st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
                     st.error(f"Error displaying buy/sell percentages chart: {e}")
+                
+                # Market Cap Percentage (if available for INDEX)
+                try:
+                    if "MarketCap_Percentage" in filtered_index_data.columns:
+                        market_cap_data = filtered_index_data.groupby("Symbol")["MarketCap_Percentage"].mean().reset_index()
+                        
+                        fig = px.bar(
+                            market_cap_data,
+                            x="Symbol",
+                            y="MarketCap_Percentage",
+                            title="Average Market Cap Percentage by Index",
+                            labels={"MarketCap_Percentage": "Market Cap %", "Symbol": "Index"}
+                        )
+                        
+                        # Update chart font size
+                        fig.update_layout(
+                            title_font=dict(size=20),
+                            legend_font=dict(size=20),
+                            xaxis_title_font=dict(size=20),
+                            yaxis_title_font=dict(size=20),
+                            xaxis_tickfont=dict(size=20),
+                            yaxis_tickfont=dict(size=20)
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error displaying market cap chart: {e}")
             else:
                 st.info("Please select at least one index to display data.")
 
@@ -516,7 +550,36 @@ if connection_status:
             if selected_stocks:
                 filtered_stock_data = filtered_data["STOCKS"][filtered_data["STOCKS"]["Symbol"].isin(selected_stocks)]
                 
-                # Show the data table
+                # Calculate NetQtyFwd Average Values
+                # 1. For entire dataset
+                entire_dataset_avg = data["STOCKS"][data["STOCKS"]["Symbol"].isin(selected_stocks)].groupby("Symbol")["NetQtyCarryFwd"].mean().reset_index()
+                entire_dataset_avg = entire_dataset_avg.rename(columns={"NetQtyCarryFwd": "NetQtyFwd_Avg_All"})
+                
+                # 2. For 3-month period
+                max_date = filtered_data["STOCKS"]["Date"].max()
+                three_months_ago = max_date - pd.Timedelta(days=90)
+                three_month_data = filtered_data["STOCKS"][
+                    (filtered_data["STOCKS"]["Date"] >= three_months_ago) & 
+                    (filtered_data["STOCKS"]["Symbol"].isin(selected_stocks))
+                ]
+                three_month_avg = three_month_data.groupby("Symbol")["NetQtyCarryFwd"].mean().reset_index()
+                three_month_avg = three_month_avg.rename(columns={"NetQtyCarryFwd": "NetQtyFwd_Avg_3Months"})
+                
+                # Merge averages with the filtered data
+                filtered_stock_data = pd.merge(
+                    filtered_stock_data,
+                    entire_dataset_avg,
+                    on="Symbol",
+                    how="left"
+                )
+                filtered_stock_data = pd.merge(
+                    filtered_stock_data,
+                    three_month_avg,
+                    on="Symbol",
+                    how="left"
+                )
+                
+                # Show the data table with the new columns
                 st.subheader("Stock Data Table")
                 st.dataframe(filtered_stock_data, use_container_width=True)
                 
@@ -782,7 +845,7 @@ if connection_status:
             except Exception as e:
                 st.error(f"Error displaying Nifty comparison chart: {e}")
                 
-        # New tab for Percentage Change Analysis
+        # Percentage Change Analysis
         with tab6:
             st.header("Percentage Change Analysis")
             
@@ -1301,8 +1364,527 @@ if connection_status:
                 else:
                     st.warning("Date column not found in INDEX data.")
 
-        # Raw Data tab (now tab7)
+        # Percentage Change (NetQtyFwd) Tab
         with tab7:
+            st.header("Percentage Change Analysis (NetQtyCarryFwd)")
+            
+            # Create subtabs for STOCKS and INDEX
+            qty_tab1, qty_tab2 = st.tabs(["STOCKS Qty Percentage Change", "INDEX Qty Percentage Change"])
+            
+            with qty_tab1:
+                st.subheader("STOCKS NetQtyCarryFwd Percentage Change Analysis")
+                
+                # User inputs for percentage threshold and time period
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    stocks_qty_pct_threshold = st.number_input("Percentage Change Threshold (%)", 
+                                                              min_value=1, max_value=100, value=10, key="stocks_qty_pct")
+                
+                with col2:
+                    stocks_qty_days_lookback = st.number_input("Days Lookback Period", 
+                                                              min_value=1, max_value=365, value=7, key="stocks_qty_days")
+                
+                # Apply analysis to STOCKS
+                if 'Date' in filtered_data["STOCKS"].columns:
+                    # Get the current max date in the filtered data
+                    max_date = filtered_data["STOCKS"]["Date"].max()
+                    
+                    # Calculate lookback date
+                    lookback_date = max_date - pd.Timedelta(days=stocks_qty_days_lookback)
+                    
+                    # Get all data from the lookback period
+                    lookback_data = filtered_data["STOCKS"][filtered_data["STOCKS"]["Date"] >= lookback_date]
+                    
+                    if not lookback_data.empty:
+                        # Get the earliest and latest dates for each stock in the lookback period
+                        earliest_data = lookback_data.sort_values("Date").groupby("Symbol").first().reset_index()
+                        latest_data = lookback_data.sort_values("Date").groupby("Symbol").last().reset_index()
+                        
+                        # Rename columns to avoid confusion
+                        earliest_data = earliest_data.rename(columns={
+                            "Date": "StartDate",
+                            "NetQtyCarryFwd": "StartQty"
+                        })
+                        
+                        latest_data = latest_data.rename(columns={
+                            "Date": "EndDate",
+                            "NetQtyCarryFwd": "EndQty"
+                        })
+                        
+                        # Select only necessary columns
+                        earliest_data = earliest_data[["Symbol", "StartDate", "StartQty"]]
+                        latest_data = latest_data[["Symbol", "EndDate", "EndQty"]]
+                        
+                        # Merge data
+                        merged_data = pd.merge(earliest_data, latest_data, on="Symbol")
+                        
+                        # Calculate days between
+                        merged_data["DaysBetween"] = (merged_data["EndDate"] - merged_data["StartDate"]).dt.days
+                        
+                        # Calculate percentage change
+                        merged_data["PctChange"] = ((merged_data["EndQty"] - merged_data["StartQty"]) / 
+                                                   merged_data["StartQty"].replace(0, float('nan'))) * 100
+                        
+                        # Replace infinite values with NaN (happens when StartQty is 0)
+                        merged_data["PctChange"].replace([float('inf'), float('-inf')], float('nan'), inplace=True)
+                        
+                        # Filter based on threshold and minimum days
+                        min_days_required = max(1, stocks_qty_days_lookback * 0.5)  # At least 50% of requested lookback period
+                        valid_data = merged_data[merged_data["DaysBetween"] >= min_days_required]
+                        
+                        # Drop rows with NaN percentage change
+                        valid_data = valid_data.dropna(subset=["PctChange"])
+                        
+                        significant_changes = valid_data[
+                            (valid_data["PctChange"] >= stocks_qty_pct_threshold) | 
+                            (valid_data["PctChange"] <= -stocks_qty_pct_threshold)
+                        ]
+                        
+                        # Sort by absolute percentage change (descending)
+                        significant_changes["AbsPctChange"] = significant_changes["PctChange"].abs()
+                        significant_changes = significant_changes.sort_values("AbsPctChange", ascending=False)
+                        
+                        # Display results
+                        if not significant_changes.empty:
+                            # Add formatted columns for display
+                            significant_changes["StartQty_Formatted"] = significant_changes["StartQty"].apply(
+                                lambda x: '{:,.0f}'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["EndQty_Formatted"] = significant_changes["EndQty"].apply(
+                                lambda x: '{:,.0f}'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["PctChange_Formatted"] = significant_changes["PctChange"].apply(
+                                lambda x: '{:+.2f}%'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            
+                            # Display the table
+                            display_cols = [
+                                "Symbol", "StartDate", "EndDate", "StartQty_Formatted", 
+                                "EndQty_Formatted", "PctChange_Formatted", "DaysBetween"
+                            ]
+                            
+                            st.subheader(f"Stocks with ≥{stocks_qty_pct_threshold}% Change in Net Quantity (Last ~{stocks_qty_days_lookback} days)")
+                            st.dataframe(significant_changes[display_cols], use_container_width=True)
+                            
+                            # Create visualization
+                            fig = px.bar(
+                                significant_changes,
+                                x="Symbol",
+                                y="PctChange",
+                                title=f"Percentage Change in Net Quantity (≥{stocks_qty_pct_threshold}%)",
+                                labels={"PctChange": "% Change", "Symbol": "Stock"},
+                                color="PctChange",
+                                color_continuous_scale="RdBu",
+                                hover_data=["StartQty", "EndQty", "DaysBetween"]
+                            )
+                            
+                            # Update layout
+                            fig.update_layout(
+                                title_font=dict(size=20),
+                                legend_font=dict(size=20),
+                                xaxis_title_font=dict(size=20),
+                                yaxis_title_font=dict(size=20),
+                                xaxis_tickfont=dict(size=20),
+                                yaxis_tickfont=dict(size=20)
+                            )
+                            
+                            # Add a horizontal line at y=0
+                            fig.add_shape(
+                                type="line",
+                                x0=-0.5,
+                                y0=0,
+                                x1=len(significant_changes) - 0.5,
+                                y1=0,
+                                line=dict(color="black", width=1, dash="dash")
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Add interactive time series visualization for selected stock
+                            st.subheader("Detailed Time Series Analysis")
+                            
+                            # Create a selection box for user to select a stock
+                            selected_stock = st.selectbox(
+                                "Select a stock to view detailed trend:",
+                                options=significant_changes["Symbol"].tolist(),
+                                key="qty_stock_detail_selector"
+                            )
+                            
+                            if selected_stock:
+                                # Get all data for the selected stock within the lookback period
+                                stock_trend_data = lookback_data[lookback_data["Symbol"] == selected_stock]
+                                
+                                if not stock_trend_data.empty:
+                                    # Create trend visualization
+                                    st.subheader(f"{selected_stock} Net Quantity Trend (Last {stocks_qty_days_lookback} Days)")
+                                    
+                                    # Show beginning and ending values
+                                    start_val = stock_trend_data.sort_values("Date")["NetQtyCarryFwd"].iloc[0]
+                                    end_val = stock_trend_data.sort_values("Date")["NetQtyCarryFwd"].iloc[-1]
+                                    pct_change = ((end_val - start_val) / start_val) * 100 if start_val != 0 else float('nan')
+                                    
+                                    metric_cols = st.columns(3)
+                                    with metric_cols[0]:
+                                        st.metric("Starting Quantity", f"{start_val:,.0f}")
+                                    with metric_cols[1]:
+                                        st.metric("Ending Quantity", f"{end_val:,.0f}")
+                                    with metric_cols[2]:
+                                        st.metric("Change", f"{pct_change:+.2f}%", 
+                                                 delta_color="normal" if pct_change >= 0 else "inverse")
+                                    
+                                    # Create the line chart
+                                    fig = px.line(
+                                        stock_trend_data.sort_values("Date"),
+                                        x="Date",
+                                        y="NetQtyCarryFwd",
+                                        title=f"{selected_stock} Net Quantity Trend",
+                                        labels={"NetQtyCarryFwd": "Net Quantity", "Date": "Date"},
+                                        markers=True
+                                    )
+                                    
+                                    # Add a reference line for the starting value
+                                    fig.add_shape(
+                                        type="line",
+                                        x0=stock_trend_data["Date"].min(),
+                                        y0=start_val,
+                                        x1=stock_trend_data["Date"].max(),
+                                        y1=start_val,
+                                        line=dict(color="gray", width=1, dash="dash")
+                                    )
+                                    
+                                    # Customize chart appearance
+                                    fig.update_layout(
+                                        title_font=dict(size=20),
+                                        legend_font=dict(size=20),
+                                        xaxis_title_font=dict(size=20),
+                                        yaxis_title_font=dict(size=20),
+                                        xaxis_tickfont=dict(size=20),
+                                        yaxis_tickfont=dict(size=20)
+                                    )
+                                    
+                                    # Determine color based on trend
+                                    line_color = "green" if pct_change >= 0 else "red"
+                                    fig.update_traces(line_color=line_color)
+                                    
+                                    # Add annotations for start and end points
+                                    fig.add_annotation(
+                                        x=stock_trend_data["Date"].min(),
+                                        y=start_val,
+                                        text="Start",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    fig.add_annotation(
+                                        x=stock_trend_data["Date"].max(),
+                                        y=end_val,
+                                        text="End",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    # Additional analysis metrics
+                                    with st.expander("Additional Statistics"):
+                                        stats_df = pd.DataFrame({
+                                            "Metric": ["Mean Quantity", "Max Quantity", "Min Quantity", "Standard Deviation", "Days Tracked"],
+                                            "Value": [
+                                                f"{stock_trend_data['NetQtyCarryFwd'].mean():,.0f}",
+                                                f"{stock_trend_data['NetQtyCarryFwd'].max():,.0f}",
+                                                f"{stock_trend_data['NetQtyCarryFwd'].min():,.0f}",
+                                                f"{stock_trend_data['NetQtyCarryFwd'].std():,.0f}",
+                                                f"{len(stock_trend_data)} days"
+                                            ]
+                                        })
+                                        st.dataframe(stats_df, use_container_width=True)
+                                else:
+                                    st.warning(f"No trend data available for {selected_stock} within the selected time period.")
+                            
+                            # Additionally, show separate tables for rising and falling stocks
+                            rising_stocks = significant_changes[significant_changes["PctChange"] > 0]
+                            falling_stocks = significant_changes[significant_changes["PctChange"] < 0]
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.subheader(f"Rising Stocks (≥{stocks_qty_pct_threshold}%)")
+                                if not rising_stocks.empty:
+                                    st.dataframe(rising_stocks[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No stocks found with a rise ≥{stocks_qty_pct_threshold}%.")
+                            
+                            with col2:
+                                st.subheader(f"Falling Stocks (≥{stocks_qty_pct_threshold}%)")
+                                if not falling_stocks.empty:
+                                    st.dataframe(falling_stocks[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No stocks found with a fall ≥{stocks_qty_pct_threshold}%.")
+                        else:
+                            st.info(f"No stocks found with changes ≥{stocks_qty_pct_threshold}% in the last ~{stocks_qty_days_lookback} days.")
+                    else:
+                        st.warning(f"Insufficient data for the selected lookback period of {stocks_qty_days_lookback} days.")
+                else:
+                    st.warning("Date column not found in STOCKS data.")
+            
+            with qty_tab2:
+                st.subheader("INDEX NetQtyCarryFwd Percentage Change Analysis")
+                
+                # User inputs for percentage threshold and time period
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    index_qty_pct_threshold = st.number_input("Percentage Change Threshold (%)", 
+                                                             min_value=1, max_value=100, value=5, key="index_qty_pct")
+                
+                with col2:
+                    index_qty_days_lookback = st.number_input("Days Lookback Period", 
+                                                             min_value=1, max_value=365, value=7, key="index_qty_days")
+                
+                # Apply analysis to INDEX
+                if 'Date' in filtered_data["INDEX"].columns:
+                    # Get the current max date in the filtered data
+                    max_date = filtered_data["INDEX"]["Date"].max()
+                    
+                    # Calculate lookback date
+                    lookback_date = max_date - pd.Timedelta(days=index_qty_days_lookback)
+                    
+                    # Get all data from the lookback period
+                    lookback_data = filtered_data["INDEX"][filtered_data["INDEX"]["Date"] >= lookback_date]
+                    
+                    if not lookback_data.empty:
+                        # Get the earliest and latest dates for each index in the lookback period
+                        earliest_data = lookback_data.sort_values("Date").groupby("Symbol").first().reset_index()
+                        latest_data = lookback_data.sort_values("Date").groupby("Symbol").last().reset_index()
+                        
+                        # Rename columns to avoid confusion
+                        earliest_data = earliest_data.rename(columns={
+                            "Date": "StartDate",
+                            "NetQtyCarryFwd": "StartQty"
+                        })
+                        
+                        latest_data = latest_data.rename(columns={
+                            "Date": "EndDate",
+                            "NetQtyCarryFwd": "EndQty"
+                        })
+                        
+                        # Select only necessary columns
+                        earliest_data = earliest_data[["Symbol", "StartDate", "StartQty"]]
+                        latest_data = latest_data[["Symbol", "EndDate", "EndQty"]]
+                        
+                        # Merge data
+                        merged_data = pd.merge(earliest_data, latest_data, on="Symbol")
+                        
+                        # Calculate days between
+                        merged_data["DaysBetween"] = (merged_data["EndDate"] - merged_data["StartDate"]).dt.days
+                        
+                        # Calculate percentage change
+                        merged_data["PctChange"] = ((merged_data["EndQty"] - merged_data["StartQty"]) / 
+                                                   merged_data["StartQty"].replace(0, float('nan'))) * 100
+                        
+                        # Replace infinite values with NaN (happens when StartQty is 0)
+                        merged_data["PctChange"].replace([float('inf'), float('-inf')], float('nan'), inplace=True)
+                        
+                        # Filter based on threshold and minimum days
+                        min_days_required = max(1, index_qty_days_lookback * 0.5)  # At least 50% of requested lookback period
+                        valid_data = merged_data[merged_data["DaysBetween"] >= min_days_required]
+                        
+                        # Drop rows with NaN percentage change
+                        valid_data = valid_data.dropna(subset=["PctChange"])
+                        
+                        significant_changes = valid_data[
+                            (valid_data["PctChange"] >= index_qty_pct_threshold) | 
+                            (valid_data["PctChange"] <= -index_qty_pct_threshold)
+                        ]
+                        
+                        # Sort by absolute percentage change (descending)
+                        significant_changes["AbsPctChange"] = significant_changes["PctChange"].abs()
+                        significant_changes = significant_changes.sort_values("AbsPctChange", ascending=False)
+                        
+                        # Display results
+                        if not significant_changes.empty:
+                            # Add formatted columns for display
+                            significant_changes["StartQty_Formatted"] = significant_changes["StartQty"].apply(
+                                lambda x: '{:,.0f}'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["EndQty_Formatted"] = significant_changes["EndQty"].apply(
+                                lambda x: '{:,.0f}'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            significant_changes["PctChange_Formatted"] = significant_changes["PctChange"].apply(
+                                lambda x: '{:+.2f}%'.format(x) if pd.notnull(x) else 'N/A'
+                            )
+                            
+                            # Display the table
+                            display_cols = [
+                                "Symbol", "StartDate", "EndDate", "StartQty_Formatted", 
+                                "EndQty_Formatted", "PctChange_Formatted", "DaysBetween"
+                            ]
+                            
+                            st.subheader(f"Indices with ≥{index_qty_pct_threshold}% Change in Net Quantity (Last ~{index_qty_days_lookback} days)")
+                            st.dataframe(significant_changes[display_cols], use_container_width=True)
+                            
+                            # Create visualization
+                            fig = px.bar(
+                                significant_changes,
+                                x="Symbol",
+                                y="PctChange",
+                                title=f"Percentage Change in Net Quantity (≥{index_qty_pct_threshold}%)",
+                                labels={"PctChange": "% Change", "Symbol": "Index"},
+                                color="PctChange",
+                                color_continuous_scale="RdBu",
+                                hover_data=["StartQty", "EndQty", "DaysBetween"]
+                            )
+                            
+                            # Update layout
+                            fig.update_layout(
+                                title_font=dict(size=20),
+                                legend_font=dict(size=20),
+                                xaxis_title_font=dict(size=20),
+                                yaxis_title_font=dict(size=20),
+                                xaxis_tickfont=dict(size=20),
+                                yaxis_tickfont=dict(size=20)
+                            )
+                            
+                            # Add a horizontal line at y=0
+                            fig.add_shape(
+                                type="line",
+                                x0=-0.5,
+                                y0=0,
+                                x1=len(significant_changes) - 0.5,
+                                y1=0,
+                                line=dict(color="black", width=1, dash="dash")
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Add interactive time series visualization for selected index
+                            st.subheader("Detailed Time Series Analysis")
+                            
+                            # Create a selection box for user to select an index
+                            selected_index = st.selectbox(
+                                "Select an index to view detailed trend:",
+                                options=significant_changes["Symbol"].tolist(),
+                                key="qty_index_detail_selector"
+                            )
+                            
+                            if selected_index:
+                                # Get all data for the selected index within the lookback period
+                                index_trend_data = lookback_data[lookback_data["Symbol"] == selected_index]
+                                
+                                if not index_trend_data.empty:
+                                    # Create trend visualization
+                                    st.subheader(f"{selected_index} Net Quantity Trend (Last {index_qty_days_lookback} Days)")
+                                    
+                                    # Show beginning and ending values
+                                    start_val = index_trend_data.sort_values("Date")["NetQtyCarryFwd"].iloc[0]
+                                    end_val = index_trend_data.sort_values("Date")["NetQtyCarryFwd"].iloc[-1]
+                                    pct_change = ((end_val - start_val) / start_val) * 100 if start_val != 0 else float('nan')
+                                    
+                                    metric_cols = st.columns(3)
+                                    with metric_cols[0]:
+                                        st.metric("Starting Quantity", f"{start_val:,.0f}")
+                                    with metric_cols[1]:
+                                        st.metric("Ending Quantity", f"{end_val:,.0f}")
+                                    with metric_cols[2]:
+                                        st.metric("Change", f"{pct_change:+.2f}%", 
+                                                 delta_color="normal" if pct_change >= 0 else "inverse")
+                                    
+                                    # Create the line chart
+                                    fig = px.line(
+                                        index_trend_data.sort_values("Date"),
+                                        x="Date",
+                                        y="NetQtyCarryFwd",
+                                        title=f"{selected_index} Net Quantity Trend",
+                                        labels={"NetQtyCarryFwd": "Net Quantity", "Date": "Date"},
+                                        markers=True
+                                    )
+                                    
+                                    # Add a reference line for the starting value
+                                    fig.add_shape(
+                                        type="line",
+                                        x0=index_trend_data["Date"].min(),
+                                        y0=start_val,
+                                        x1=index_trend_data["Date"].max(),
+                                        y1=start_val,
+                                        line=dict(color="gray", width=1, dash="dash")
+                                    )
+                                    
+                                    # Customize chart appearance
+                                    fig.update_layout(
+                                        title_font=dict(size=20),
+                                        legend_font=dict(size=20),
+                                        xaxis_title_font=dict(size=20),
+                                        yaxis_title_font=dict(size=20),
+                                        xaxis_tickfont=dict(size=20),
+                                        yaxis_tickfont=dict(size=20)
+                                    )
+                                    
+                                    # Determine color based on trend
+                                    line_color = "green" if pct_change >= 0 else "red"
+                                    fig.update_traces(line_color=line_color)
+                                    
+                                    # Add annotations for start and end points
+                                    fig.add_annotation(
+                                        x=index_trend_data["Date"].min(),
+                                        y=start_val,
+                                        text="Start",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    fig.add_annotation(
+                                        x=index_trend_data["Date"].max(),
+                                        y=end_val,
+                                        text="End",
+                                        showarrow=True,
+                                        arrowhead=1
+                                    )
+                                    
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    
+                                    # Additional analysis metrics
+                                    with st.expander("Additional Statistics"):
+                                        stats_df = pd.DataFrame({
+                                            "Metric": ["Mean Quantity", "Max Quantity", "Min Quantity", "Standard Deviation", "Days Tracked"],
+                                            "Value": [
+                                                f"{index_trend_data['NetQtyCarryFwd'].mean():,.0f}",
+                                                f"{index_trend_data['NetQtyCarryFwd'].max():,.0f}",
+                                                f"{index_trend_data['NetQtyCarryFwd'].min():,.0f}",
+                                                f"{index_trend_data['NetQtyCarryFwd'].std():,.0f}",
+                                                f"{len(index_trend_data)} days"
+                                            ]
+                                        })
+                                        st.dataframe(stats_df, use_container_width=True)
+                                else:
+                                    st.warning(f"No trend data available for {selected_index} within the selected time period.")
+                            
+                            # Additionally, show separate tables for rising and falling indices
+                            rising_indices = significant_changes[significant_changes["PctChange"] > 0]
+                            falling_indices = significant_changes[significant_changes["PctChange"] < 0]
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.subheader(f"Rising Indices (≥{index_qty_pct_threshold}%)")
+                                if not rising_indices.empty:
+                                    st.dataframe(rising_indices[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No indices found with a rise ≥{index_qty_pct_threshold}%.")
+                            
+                            with col2:
+                                st.subheader(f"Falling Indices (≥{index_qty_pct_threshold}%)")
+                                if not falling_indices.empty:
+                                    st.dataframe(falling_indices[display_cols], use_container_width=True)
+                                else:
+                                    st.info(f"No indices found with a fall ≥{index_qty_pct_threshold}%.")
+                        else:
+                            st.info(f"No indices found with changes ≥{index_qty_pct_threshold}% in the last ~{index_qty_days_lookback} days.")
+                    else:
+                        st.warning(f"Insufficient data for the selected lookback period of {index_qty_days_lookback} days.")
+                else:
+                    st.warning("Date column not found in INDEX data.")
+
+        # Raw Data tab
+        with tab8:
             st.header("Raw Data")
             
             # Define columns to hide by default for each table
