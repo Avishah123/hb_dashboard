@@ -11,6 +11,8 @@ import time
 # Page configuration
 st.set_page_config(page_title="Market Data Dashboard", layout="wide")
 
+
+
 # Add minimal CSS for font size and alignment
 st.markdown("""
 <style>
@@ -54,6 +56,21 @@ PG_PASSWORD = st.secrets["postgresql"]["password"]
 
 # SQLAlchemy connection string for pandas
 pg_connection_string = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DATABASE}"
+
+if st.button("Test DB Connection"):
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            connect_timeout=10
+        )
+        st.success("Connected successfully!")
+        conn.close()
+    except Exception as e:
+        st.error(f"Connection failed: {e}")
 
 # Add title and description
 st.title("Market Data Dashboard")
