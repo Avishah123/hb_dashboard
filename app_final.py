@@ -262,6 +262,42 @@ def load_data():
         if 'MarketCap_Percentage' in df_index.columns:
             df_index['MarketCap_Percentage'] = df_index['MarketCap_Percentage'] * 100
         
+        if 'NewTotal' in df_stocks.columns and 'TotalBuyClients' in df_stocks.columns and 'TotalSellClients' in df_stocks.columns:
+            stocks_daily_sums = df_stocks.groupby('Date').agg({
+                'NewTotal': 'sum',
+                'TotalBuyClients': 'sum',
+                'TotalSellClients': 'sum'
+            }).reset_index()
+            
+            # Rename columns to indicate they are sums
+            stocks_daily_sums = stocks_daily_sums.rename(columns={
+                'NewTotal': 'TotalNewTotal',
+                'TotalBuyClients': 'TotalBuyClientsSum', 
+                'TotalSellClients': 'TotalSellClientsSum'
+            })
+            
+            # Merge with Total_Stocks
+            df_total_stocks = pd.merge(df_total_stocks, stocks_daily_sums, on='Date', how='left')
+
+# Calculate daily sums for index
+        if 'NewTotal' in df_index.columns and 'TotalBuyClients' in df_index.columns and 'TotalSellClients' in df_index.columns:
+            index_daily_sums = df_index.groupby('Date').agg({
+                'NewTotal': 'sum',
+                'TotalBuyClients': 'sum',
+                'TotalSellClients': 'sum'
+            }).reset_index()
+            
+            # Rename columns to indicate they are sums
+            index_daily_sums = index_daily_sums.rename(columns={
+                'NewTotal': 'TotalNewTotal',
+                'TotalBuyClients': 'TotalBuyClientsSum', 
+                'TotalSellClients': 'TotalSellClientsSum'
+            })
+            
+            # Merge with Total_Index
+            df_total_index = pd.merge(df_total_index, index_daily_sums, on='Date', how='left')
+
+
         return {
             "INDEX": df_index,
             "STOCKS": df_stocks,
@@ -282,6 +318,7 @@ connection_status, connection_info = check_database()
 if connection_status:
     st.sidebar.success("✅ Connected to database")
     
+
     # Show data statistics
     if isinstance(connection_info, dict):
         counts_html = f"""
